@@ -6,7 +6,7 @@
 
 ## 1. Intructions
 
-This is AI Review Project.
+This is AI PR Review Project.
 
 ---
 
