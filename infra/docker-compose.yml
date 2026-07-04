@@ -1,0 +1,116 @@
+# Docker Compose for local development of the PR Reviewer SaaS.
+# One command: docker compose up -d
+# Launches PostgreSQL, Redis, Kafka + Zookeeper with sensible dev defaults.
+#
+# ⚡ SENIOR PATTERN: Version-pinned images (e.g. postgres:16-alpine) — never use :latest
+# in a team project. :latest breaks builds when upstream publishes a breaking change.
+
+services:
+  # ─── PostgreSQL 16 with pgvector ───
+  # Stores: users, repos, PR reviews, demo reviews, audit logs
+  # Exposed on host port 5432 (standard Postgres port)
+  postgres:
+    image: pgvector/pgvector:pg16  # Postgres 16 + pgvector pre-installed
+    container_name: ai-pr-postgres
+    environment:
+      POSTGRES_DB: ai_pr_reviewer           # database name
+      POSTGRES_USER: postgres               # superuser
+      POSTGRES_PASSWORD: postgres           # ⚠ dev only — use secrets in production
+    ports:
+      - "5432:5432"                         # host:container port mapping
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # persistent volume — data survives container restarts
+      - ./docker/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql  # auto-run schema on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_pr_reviewer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pr-reviewer-net
+
+  # ─── Redis 7 (Alpine) ───
+  # Caches: sessions, demo review, PR reviews, rate limiter counters
+  # Exposed on host port 6379 (standard Redis port)
+  redis:
+    image: redis:7-alpine
+    container_name: ai-pr-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data  # persistent volume — cache survives restarts
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pr-reviewer-net
+
+  # ─── Zookeeper (required by Kafka) ───
+  # Kafka uses Zookeeper for cluster coordination, leader election, and metadata storage.
+  # Node.js equivalent: there isn't one — Kafka's architecture is fundamentally different
+  # from message queues like RabbitMQ or Bull.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: ai-pr-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - pr-reviewer-net
+
+  # ─── Kafka Broker ───
+  # Async message backbone for:
+  #   PR Analysis Service → LangGraph Agent Service (review_requested events)
+  #   LangGraph Agent → Notification Service (review_completed events)
+  # Exposed on host port 9092 (standard Kafka port)
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: ai-pr-kafka
+    depends_on:
+      zookeeper:
+        condition: service_started  # wait for ZK before starting Kafka
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092  # accessible from host machine
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1  # single broker dev mode — 1 replica is fine
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"   # topics auto-created on first produce
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - pr-reviewer-net
+
+  # ─── Jaeger (all-in-one) ───
+  # OpenTelemetry-compatible distributed tracing backend.
+  # UI at http://localhost:16686
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ai-pr-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - pr-reviewer-net
+
+networks:
+  pr-reviewer-net:
+    driver: bridge  # default Docker bridge network — containers communicate by service name
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  kafka_data:
+    driver: local
