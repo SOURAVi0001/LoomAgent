@@ -1,0 +1,15 @@
+go 1.26.3
+
+use (
+	./api-gateway
+	./audit-service
+	./auth-service
+	./cost-analytics
+	./eval-service
+	./guardrail-service
+	./model-gateway
+	./notification-service
+	./pkg
+	./prompt-registry
+	./user-service
+)
